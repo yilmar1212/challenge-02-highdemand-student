@@ -1,3 +1,8 @@
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as cdk from 'aws-cdk-lib/core';
 import { Construct } from 'constructs';
@@ -28,5 +33,77 @@ export class CdkStack extends cdk.Stack {
       description: 'EC2: solo acepta trafico del ALB',
     });
     instanceSg.addIngressRule(albSg, ec2.Port.tcp(80), 'HTTP desde el ALB');
+
+
+        // ---- Rol IAM de las EC2 (minimo privilegio) ----
+    const instanceRole = new iam.Role(this, 'InstanceRole', {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+      ],
+    });
+
+    // ---- User data: el script de ejemplo del reto ----
+    const userData = ec2.UserData.custom(
+      fs.readFileSync(path.join(__dirname, '../../application/user-data.sh'), 'utf8'),
+    );
+
+    // ---- Launch Template ----
+    const launchTemplate = new ec2.LaunchTemplate(this, 'AppLaunchTemplate', {
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+      securityGroup: instanceSg,
+      role: instanceRole,
+      userData,
+      associatePublicIpAddress: true,
+      requireImdsv2: true,
+      blockDevices: [
+        {
+          deviceName: '/dev/xvda',
+          volume: ec2.BlockDeviceVolume.ebs(8, {
+            volumeType: ec2.EbsDeviceVolumeType.GP3,
+            encrypted: true,
+            deleteOnTermination: true,
+          }),
+        },
+      ],
+    });
+
+    // ---- Auto Scaling Group ----
+    const asg = new autoscaling.AutoScalingGroup(this, 'AppAsg', {
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      launchTemplate,
+      minCapacity: 2,
+      maxCapacity: 6,
+    });
+
+        // ---- Application Load Balancer ----
+    const alb = new elbv2.ApplicationLoadBalancer(this, 'AppAlb', {
+      vpc,
+      internetFacing: true,
+      securityGroup: albSg,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+    });
+
+    const listener = alb.addListener('HttpListener', {
+      port: 80,
+      open: false, // el albSg ya abre 80 y 443, no dejes que CDK agregue otra regla
+    });
+
+    listener.addTargets('AppTargets', {
+      port: 80,
+      targets: [asg],
+      healthCheck: {
+        path: '/health',
+        interval: cdk.Duration.seconds(15),
+        healthyThresholdCount: 2,
+        unhealthyThresholdCount: 3,
+      },
+    });
+
+    new cdk.CfnOutput(this, 'AlbUrl', {
+      value: `http://${alb.loadBalancerDnsName}`,
+    });
   }
 }
