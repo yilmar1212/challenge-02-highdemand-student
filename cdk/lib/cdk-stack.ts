@@ -1,3 +1,4 @@
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -100,6 +101,28 @@ export class CdkStack extends cdk.Stack {
         healthyThresholdCount: 2,
         unhealthyThresholdCount: 3,
       },
+    });
+
+        // ---- Boss Fight: escalar hacia afuera si la CPU pasa de 60% ----
+    asg.scaleOnCpuUtilization('CpuScaling', {
+      targetUtilizationPercent: 60,
+    });
+
+    // ---- (Opcional) Alarma de CloudWatch para monitorear el evento ----
+    const cpuMetric = new cloudwatch.Metric({
+      namespace: 'AWS/EC2',
+      metricName: 'CPUUtilization',
+      dimensionsMap: { AutoScalingGroupName: asg.autoScalingGroupName },
+      statistic: 'Average',
+      period: cdk.Duration.minutes(5),
+    });
+
+    new cloudwatch.Alarm(this, 'HighCpuAlarm', {
+      metric: cpuMetric,
+      threshold: 60,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      alarmDescription: 'CPU promedio del ASG mayor a 60%',
     });
 
     new cdk.CfnOutput(this, 'AlbUrl', {
